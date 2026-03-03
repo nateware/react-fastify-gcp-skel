@@ -1,6 +1,6 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import * as schema from "../db/schema.js";
+import * as authSchema from "../db/auth-schema.js";
 import type { DbClient } from "../plugins/db.js";
 
 /**
@@ -14,7 +14,7 @@ export function createAuth(db: DbClient) {
     secret: process.env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, {
       provider: "pg",
-      schema,
+      schema: authSchema,
     }),
     socialProviders: {
       google: {

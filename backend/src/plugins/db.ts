@@ -2,8 +2,11 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { FastifyInstance } from "fastify";
 import fp from "fastify-plugin";
 
+import * as authSchema from "../db/auth-schema.js";
 import { createPool } from "../db/connect.js";
-import * as schema from "../db/schema.js";
+import * as appSchema from "../db/schema.js";
+
+const schema = { ...authSchema, ...appSchema };
 
 export type DbClient = NodePgDatabase<typeof schema>;
 
