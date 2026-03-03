@@ -1,0 +1,70 @@
+name: _Deploy Frontend
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
+jobs:
+  deploy-spa:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend (SPA)
+        run: pnpm --filter frontend run build
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Sync assets to GCS (hashed files - long cache)
+        run: |
+          gsutil -m rsync -r -d \
+            -h "Cache-Control:public, max-age=31536000, immutable" \
+            frontend/dist/assets/ \
+            gs://${{ vars.GCS_BUCKET }}/assets/
+
+      - name: Sync remaining files to GCS (short cache)
+        run: |
+          gsutil -m rsync -r -d \
+            -h "Cache-Control:public, max-age=60" \
+            -x "^assets/" \
+            frontend/dist/ \
+            gs://${{ vars.GCS_BUCKET }}/
+
+      - name: Invalidate CDN cache
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
+            --path "/*" --async
