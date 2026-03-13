@@ -9,10 +9,10 @@
       "ZSH_IN_DOCKER_VERSION": "1.2.0"
     }
   },
-  "runArgs": [
-    "--cap-add=NET_ADMIN",
-    "--cap-add=NET_RAW"
-  ],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -40,6 +40,11 @@
       }
     }
   },
+  "forwardPorts": [5173, 3001],
+  "portsAttributes": {
+    "5173": { "label": "Frontend", "onAutoForward": "openBrowser" },
+    "3001": { "label": "Backend API", "onAutoForward": "silent" }
+  },
   "remoteUser": "node",
   "mounts": [
     "source=claude-code-bashhistory-${devcontainerId},target=/commandhistory,type=volume",
@@ -52,6 +57,6 @@
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
-  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && echo '{\"dangerouslySkipPermissions\": true}' > /home/node/.claude/settings.json",
+  "postStartCommand": "sudo /usr/sbin/service postgresql start && sudo /usr/local/share/docker-init.sh && pnpm --filter backend db:migrate && pnpm --filter backend db:seed && echo '{\"dangerouslySkipPermissions\": true}' > /home/node/.claude/settings.json",
   "waitFor": "postStartCommand"
 }

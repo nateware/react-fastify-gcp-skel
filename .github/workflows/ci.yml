@@ -12,6 +12,7 @@ jobs:
 
     env:
       TURBO_TELEMETRY_DISABLED: 1
+      CI: true
 
     steps:
       - uses: actions/checkout@v4

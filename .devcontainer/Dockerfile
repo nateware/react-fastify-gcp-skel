@@ -1,11 +1,11 @@
-FROM node:20
+FROM node:24
 
 ARG TZ
 ENV TZ="$TZ"
 
 ARG CLAUDE_CODE_VERSION=latest
 
-# Install basic development tools and iptables/ipset
+# Install basic development tools and PostgreSQL
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
   git \
@@ -25,7 +25,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   jq \
   nano \
   vim \
+  postgresql \
+  postgresql-client \
+  locales \
+  && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+# Create dev database and user (runs at build time, before firewall)
+RUN service postgresql start && \
+  su - postgres -c "psql -c \"CREATE USER devuser WITH PASSWORD 'devpass';\"" && \
+  su - postgres -c "psql -c \"CREATE DATABASE app OWNER devuser;\"" && \
+  service postgresql stop
 
 # Ensure default node user has access to /usr/local/share
 RUN mkdir -p /usr/local/share/npm-global && \
@@ -78,14 +91,17 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
   -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
   -x
 
-# Install Claude
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+# Install Claude and pnpm
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} pnpm
 
 
-# Copy and set up firewall script
+# Copy and set up firewall script; grant sudo for docker-init, firewall, and iptables/ipset
 COPY init-firewall.sh /usr/local/bin/
 USER root
 RUN chmod +x /usr/local/bin/init-firewall.sh && \
   echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node-firewall && \
-  chmod 0440 /etc/sudoers.d/node-firewall
+  echo "node ALL=(root) NOPASSWD: /usr/local/share/docker-init.sh" > /etc/sudoers.d/node-docker && \
+  echo "node ALL=(root) NOPASSWD: /usr/sbin/service postgresql start" > /etc/sudoers.d/node-postgres && \
+  echo "node ALL=(root) NOPASSWD: /sbin/iptables, /sbin/ipset" > /etc/sudoers.d/node-iptables && \
+  chmod 0440 /etc/sudoers.d/node-firewall /etc/sudoers.d/node-docker /etc/sudoers.d/node-postgres /etc/sudoers.d/node-iptables
 USER node

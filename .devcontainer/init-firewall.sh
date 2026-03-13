@@ -72,20 +72,73 @@ for domain in \
     "statsig.com" \
     "marketplace.visualstudio.com" \
     "vscode.blob.core.windows.net" \
-    "update.code.visualstudio.com"; do
+    "update.code.visualstudio.com" \
+    "oauth2.googleapis.com" \
+    "token.googleapis.com" \
+    "apis.google.com" \
+    "www.googleapis.com" \
+    "accounts.google.com"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
         echo "ERROR: Failed to resolve $domain"
         exit 1
     fi
-    
+
     while read -r ip; do
         if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             echo "ERROR: Invalid IP from DNS for $domain: $ip"
             exit 1
         fi
         echo "Adding $ip for $domain"
+        ipset add allowed-domains "$ip" -exist
+    done < <(echo "$ips")
+done
+
+# Add Google's full IPv4 ranges (AS15169 — covers all Google consumer/workspace services).
+# SPF _netblocks records only cover legacy ranges; newer 142.250.0.0/15 blocks are hardcoded here.
+echo "Adding Google IP ranges..."
+for cidr in \
+    "74.125.0.0/16" \
+    "209.85.128.0/17" \
+    "142.250.0.0/15" \
+    "172.217.0.0/16" \
+    "172.253.0.0/16" \
+    "173.194.0.0/16" \
+    "108.177.8.0/21" \
+    "108.177.96.0/19" \
+    "216.58.192.0/19" \
+    "216.239.32.0/19" \
+    "64.233.160.0/19" \
+    "66.102.0.0/20" \
+    "66.249.64.0/19"; do
+    echo "Adding Google range $cidr"
+    ipset add allowed-domains "$cidr" -exist
+done
+
+# Resolve and add VS Code port-forwarding / tunnel domains (soft-fail: warn but don't exit)
+# These are required for devcontainer port forwarding token validation.
+for domain in \
+    "global.rel.tunnels.api.visualstudio.com" \
+    "westus2.rel.tunnels.api.visualstudio.com" \
+    "eastus.rel.tunnels.api.visualstudio.com" \
+    "westeurope.rel.tunnels.api.visualstudio.com" \
+    "southeastasia.rel.tunnels.api.visualstudio.com" \
+    "servicebus.windows.net" \
+    "management.core.windows.net"; do
+    echo "Resolving VS Code tunnel domain $domain..."
+    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
+    if [ -z "$ips" ]; then
+        echo "WARN: Failed to resolve $domain, skipping"
+        continue
+    fi
+
+    while read -r ip; do
+        if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "WARN: Invalid IP from DNS for $domain: $ip, skipping"
+            continue
+        fi
+        echo "Adding $ip for VS Code tunnel domain $domain"
         ipset add allowed-domains "$ip" -exist
     done < <(echo "$ips")
 done

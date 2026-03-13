@@ -16,18 +16,20 @@
 set -euo pipefail
 
 # ─── Configuration (edit these) ───────────────────────────────
-PROJECT_ID_STAGING="react-fastify-gcp-skel-staging"         # must be globally unique
-PROJECT_ID_PRODUCTION="react-fastify-gcp-skel-production"   # must be globally unique
+PROJECT_ID_STAGING="chemistry-code-staging"         # must be globally unique
+PROJECT_ID_PRODUCTION="chemistry-code-production"   # must be globally unique
 REGION="us-central1"
 GITHUB_ORG="nateware"    # or personal username
-GITHUB_REPO="react-fastify-gcp-skel"
-DOMAIN_STAGING="app.staging.nojungle.com"      # optional: e.g. staging.myapp.example.com
-DOMAIN_PRODUCTION="app.nojungle.com"           # optional: e.g. myapp.example.com
-API_DOMAIN_STAGING="api.staging.nojungle.com"  # optional: custom domain for Cloud Run backend
-API_DOMAIN_PRODUCTION="api.nojungle.com"       # optional: custom domain for Cloud Run backend
+GITHUB_REPO="chemcode"
+DOMAIN_STAGING="app.staging.chemtut.com"      # optional: e.g. staging.myapp.example.com
+DOMAIN_PRODUCTION="app.chemtut.com"           # optional: e.g. myapp.example.com
+API_DOMAIN_STAGING="api.staging.chemtut.com"  # optional: custom domain for Cloud Run backend
+API_DOMAIN_PRODUCTION="api.chemtut.com"       # optional: custom domain for Cloud Run backend
 SQL_INSTANCE="postgres"                        # Cloud SQL instance name
 SQL_DB="app"                                   # database name
 SQL_TIER="db-f1-micro"                         # smallest; resize via console later
+PARENT_DNS_PROJECT="chemistry-code-production" # project containing the apex chemtut.com zone
+PARENT_DNS_ZONE="chemtut"                      # Cloud DNS zone name for chemtut.com apex
 # ──────────────────────────────────────────────────────────────
 
 ENV="${1:?Usage: $0 <staging|production>}"
@@ -181,6 +183,7 @@ for ROLE in \
     --quiet
 done
 
+
 echo "==> Binding WIF to service account..."
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --project="$PROJECT_ID" \
@@ -288,12 +291,25 @@ if [ -n "$DOMAIN" ]; then
   fi
 
   FRONTEND_NS=$(gcloud dns managed-zones describe "$DNS_ZONE_NAME" \
-    --project="$PROJECT_ID" --format="value(nameServers)")
-  echo ""
+    --project="$PROJECT_ID" --format="value(nameServers)" | tr ';' ',')
   echo "   Frontend static IP: ${STATIC_IP}"
-  echo ""
-  echo "   Update your domain registrar's NS records for ${DOMAIN} to:"
-  echo "   ${FRONTEND_NS}" | tr ';' '\n' | sed 's/^/   /'
+
+  echo "==> Adding NS delegation for ${DOMAIN} to parent zone (${PARENT_DNS_ZONE})..."
+  EXISTING_NS=$(gcloud dns record-sets list \
+    --project="$PARENT_DNS_PROJECT" \
+    --zone="$PARENT_DNS_ZONE" \
+    --name="${DOMAIN}." \
+    --type=NS \
+    --format="value(name)" 2>/dev/null)
+  if [ -z "$EXISTING_NS" ]; then
+    gcloud dns record-sets create "${DOMAIN}." \
+      --project="$PARENT_DNS_PROJECT" \
+      --zone="$PARENT_DNS_ZONE" \
+      --type=NS --ttl=300 \
+      --rrdatas="$FRONTEND_NS"
+  else
+    echo "   NS delegation already exists."
+  fi
 else
   echo "   (No DOMAIN_$(echo "$ENV" | tr '[:lower:]' '[:upper:]') set — skipping HTTPS proxy.)"
   echo "   Set it in this script and re-run to create SSL + LB."
@@ -386,7 +402,7 @@ gcloud sql users set-password postgres \
 # gcloud sql connect doesn't forward env vars to its child psql process.
 # Pass --token so the proxy uses gcloud's auth (not Application Default Credentials).
 PROXY_PORT=15432
-PROXY_BIN="$(gcloud info --format='value(installation.sdk_root)')/bin/cloud-sql-proxy"
+PROXY_BIN="cloud-sql-proxy"
 ACCESS_TOKEN="$(gcloud auth print-access-token)"
 
 echo "   Starting Cloud SQL proxy..."
@@ -396,6 +412,7 @@ sleep 3
 
 PGPASSWORD="$POSTGRES_PASSWORD" psql \
   -h 127.0.0.1 -p "$PROXY_PORT" -U postgres -d "$SQL_DB" <<EOSQL
+GRANT ALL PRIVILEGES ON DATABASE "${SQL_DB}" TO "${IAM_DB_USER}";
 GRANT ALL PRIVILEGES ON SCHEMA public TO "${IAM_DB_USER}";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${IAM_DB_USER}";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${IAM_DB_USER}";
@@ -409,18 +426,25 @@ wait "$PROXY_PID" 2>/dev/null
 echo "   Privileges granted."
 
 # ─── API Domain (Cloud Run backend) ──────────────────────────
+# NOTE: Before running this section for the first time, you must verify domain
+# ownership in Google Search Console: https://search.google.com/search-console
+# Add the property for your apex domain (e.g. chemtut.com) using the DNS TXT
+# record method, then add the TXT record to your apex Cloud DNS zone.
 if [ -n "$API_DOMAIN" ]; then
   API_DNS_ZONE_NAME="api-dns-${ENV}"
 
   echo "==> Creating Cloud DNS zone for ${API_DOMAIN}..."
-  gcloud dns managed-zones describe "$API_DNS_ZONE_NAME" \
-    --project="$PROJECT_ID" 2>/dev/null || \
-  gcloud dns managed-zones create "$API_DNS_ZONE_NAME" \
-    --project="$PROJECT_ID" \
-    --dns-name="${API_DOMAIN}." \
-    --description="API backend DNS (${ENV})"
+  if ! gcloud dns managed-zones describe "$API_DNS_ZONE_NAME" \
+      --project="$PROJECT_ID" 2>/dev/null; then
+    gcloud dns managed-zones create "$API_DNS_ZONE_NAME" \
+      --project="$PROJECT_ID" \
+      --dns-name="${API_DOMAIN}." \
+      --description="API backend DNS (${ENV})"
+  else
+    echo "   Zone already exists."
+  fi
 
-  # Cloud Run domain mapping uses Google's IPs for apex domains.
+  # Cloud Run domain mapping uses Google's anycast IPs.
   # CNAME is not allowed at zone apex, so we use A records instead.
   # See: https://cloud.google.com/run/docs/mapping-custom-domains#dns_update
   CLOUD_RUN_IPS="216.239.32.21,216.239.34.21,216.239.36.21,216.239.38.21"
@@ -437,29 +461,56 @@ if [ -n "$API_DOMAIN" ]; then
     gcloud dns record-sets create "${API_DOMAIN}." \
       --project="$PROJECT_ID" \
       --zone="$API_DNS_ZONE_NAME" \
-      --type="A" \
+      --type=A \
       --ttl=300 \
       --rrdatas="$CLOUD_RUN_IPS"
   else
     echo "   A records already exist."
   fi
 
+  # NS delegation must exist in the parent zone before creating the domain
+  # mapping, so that Google can verify domain ownership via DNS.
+  API_NS=$(gcloud dns managed-zones describe "$API_DNS_ZONE_NAME" \
+    --project="$PROJECT_ID" --format="value(nameServers)" | tr ';' ',')
+
+  echo "==> Adding NS delegation for ${API_DOMAIN} to parent zone (${PARENT_DNS_ZONE})..."
+  EXISTING_API_NS=$(gcloud dns record-sets list \
+    --project="$PARENT_DNS_PROJECT" \
+    --zone="$PARENT_DNS_ZONE" \
+    --name="${API_DOMAIN}." \
+    --type=NS \
+    --format="value(name)" 2>/dev/null)
+  if [ -z "$EXISTING_API_NS" ]; then
+    gcloud dns record-sets create "${API_DOMAIN}." \
+      --project="$PARENT_DNS_PROJECT" \
+      --zone="$PARENT_DNS_ZONE" \
+      --type=NS --ttl=300 \
+      --rrdatas="$API_NS"
+  else
+    echo "   NS delegation already exists."
+  fi
+
   echo "==> Creating Cloud Run domain mapping for ${API_DOMAIN}..."
+  if ! gcloud beta run domain-mappings describe \
+      --project="$PROJECT_ID" \
+      --domain="$API_DOMAIN" \
+      --region="$REGION" 2>/dev/null; then
+    gcloud beta run domain-mappings create \
+      --project="$PROJECT_ID" \
+      --service=backend \
+      --domain="$API_DOMAIN" \
+      --region="$REGION"
+  else
+    echo "   Domain mapping already exists."
+  fi
+
+  echo "==> SSL certificate status for ${API_DOMAIN}:"
   gcloud beta run domain-mappings describe \
     --project="$PROJECT_ID" \
     --domain="$API_DOMAIN" \
-    --region="$REGION" 2>/dev/null || \
-  gcloud beta run domain-mappings create \
-    --project="$PROJECT_ID" \
-    --service=backend \
-    --domain="$API_DOMAIN" \
-    --region="$REGION"
-
-  API_NS=$(gcloud dns managed-zones describe "$API_DNS_ZONE_NAME" \
-    --project="$PROJECT_ID" --format="value(nameServers)")
-  echo ""
-  echo "   Update your domain registrar's NS records for ${API_DOMAIN} to:"
-  echo "   ${API_NS}" | tr ';' '\n' | sed 's/^/   /'
+    --region="$REGION" \
+    --format="yaml(status.conditions)" 2>/dev/null || true
+  echo "   (Certificate provisioning can take 10-30 min after DNS propagates.)"
 fi
 
 # ─── Print GitHub Environment Variables ────────────────────────
@@ -476,7 +527,6 @@ echo "  GCP_REGION          = ${REGION}"
 echo "  WIF_PROVIDER        = ${WIF_PROVIDER_FULL}"
 echo "  WIF_SERVICE_ACCOUNT = ${SA_EMAIL}"
 echo "  GCS_BUCKET          = ${BUCKET}"
-echo "  CDN_URL_MAP         = ${URL_MAP_NAME}"
 echo "  CLOUDSQL_CONNECTION = ${CLOUDSQL_CONNECTION}"
 echo "  DB_IAM_USER         = ${IAM_DB_USER}"
 echo "  DB_NAME             = ${SQL_DB}"
