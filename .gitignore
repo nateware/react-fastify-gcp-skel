@@ -144,5 +144,3 @@ vite.config.ts.timestamp-*
 # pnpm
 .pnpm-store/
 
-# TanStack Router generated
-**/routeTree.gen.ts
